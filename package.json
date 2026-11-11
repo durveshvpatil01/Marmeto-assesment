@@ -1,0 +1,21 @@
+{
+  "name": "marmeto-order-shipments",
+  "version": "1.0.0",
+  "description": "Webhook -> courier shipment service with HMAC verification, idempotency, retries and reconciliation",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node scripts/dev.js",
+    "server": "node src/index.js",
+    "worker": "node src/worker-main.js",
+    "courier": "node mock-courier.js",
+    "send": "node scripts/send-webhook.js",
+    "reconcile": "node scripts/reconcile.js",
+    "replay": "node scripts/replay.js",
+    "status": "node scripts/status.js",
+    "test": "node --test --test-concurrency=1 test/"
+  }
+}
