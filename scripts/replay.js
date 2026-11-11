@@ -12,6 +12,11 @@ const ids = args.includes('--all-dead')
   ? repo.allOrders().filter((o) => o.status === 'dead').map((o) => o.order_id)
   : args.filter((a) => !a.startsWith('--'));
 
+if (args.includes('--all-dead') && ids.length === 0) {
+  console.log('no dead orders to replay');
+  repo.close();
+  process.exit(0);
+}
 if (ids.length === 0) {
   console.log('usage: npm run replay -- <orderId...> | --all-dead');
   process.exit(1);
