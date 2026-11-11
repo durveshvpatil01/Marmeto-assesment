@@ -82,6 +82,10 @@ function createRepo(db) {
     requeue: db.prepare(`
       UPDATE orders SET status = 'pending', next_attempt_at = ?, locked_until = NULL,
                         attempts = CASE WHEN ? THEN 0 ELSE attempts END, updated_at = ?
+       WHERE order_id = ? AND status IN ('pending', 'dead')`),
+    adopt: db.prepare(`
+      UPDATE orders SET status = 'shipped', shipment_id = ?, locked_until = NULL,
+                        last_error = NULL, updated_at = ?
        WHERE order_id = ? AND status <> 'shipped'`),
     countByStatus: db.prepare('SELECT status, COUNT(*) AS n FROM orders GROUP BY status'),
     all: db.prepare('SELECT * FROM orders ORDER BY created_at'),
@@ -139,7 +143,12 @@ function createRepo(db) {
       return q.unconfirmed.all({ now, staleBefore: now - graceMs });
     },
 
-    /** Put an order back on the queue. resetAttempts=true gives it a fresh retry budget. */
+    /** Record a shipment found at the courier (used by reconciliation). */
+    adoptShipment(orderId, shipmentId, now = Date.now()) {
+      return q.adopt.run(shipmentId, now, String(orderId)).changes;
+    },
+
+    /** Put a pending/dead order back on the queue (never touches one a worker holds). resetAttempts=true gives it a fresh retry budget. */
     requeue(orderId, { now = Date.now(), resetAttempts = false } = {}) {
       return q.requeue.run(now, resetAttempts ? 1 : 0, now, String(orderId)).changes;
     },
