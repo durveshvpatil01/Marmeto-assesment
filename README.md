@@ -154,6 +154,14 @@ The behaviour required by the brief is unchanged. I added:
 - Ask the courier for idempotency-key support. That removes the need for the GET-before-POST round trip.
 - Structured JSON logs with order id / webhook id correlation.
 
+## How I used AI
+I used Claude Code as a pair programmer. I wrote the plan first ([docs/PLAN.md](docs/PLAN.md)), built around
+one rule: always check the courier by reference before creating a shipment. Then I built it in the order
+the commits show, with tests alongside each step. To confirm the tests guard the critical
+behaviour, I deliberately removed the check-before-create step: 3 tests failed, so I restored it.
+I also ran it end to end against the live mock courier and fixed a small bug the run exposed
+(`replay --all-dead` printed usage instead of "nothing to replay").
+
 ## Layout
 ```
 mock-courier.js         mock courier (from the brief, plus test controls)
