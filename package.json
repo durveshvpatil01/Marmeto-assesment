@@ -16,6 +16,6 @@
     "reconcile": "node scripts/reconcile.js",
     "replay": "node scripts/replay.js",
     "status": "node scripts/status.js",
-    "test": "node --test --test-concurrency=1 test/"
+    "test": "node --test --test-concurrency=1"
   }
 }
