@@ -16,6 +16,10 @@
  *   - GET /__control/stats shows how many shipments exist per reference
  *     (the number we care about: must never be > 1).
  *   - POST /__control/reset clears everything.
+ *   - commitDelayMs (option or MOCK_COMMIT_DELAY_MS): a created shipment only becomes
+ *     visible to GET after this delay, and the POST only answers then. This models a
+ *     courier that commits asynchronously (the "GET right after a timeout shows
+ *     nothing yet" case). Default 0.
  */
 
 const http = require('node:http');
@@ -29,6 +33,7 @@ function createMockCourier(opts = {}) {
   };
   const hangMs = opts.hangMs ?? Number(process.env.MOCK_HANG_MS ?? 10000);
   const retryAfterSec = opts.retryAfterSec ?? 2;
+  const commitDelayMs = opts.commitDelayMs ?? Number(process.env.MOCK_COMMIT_DELAY_MS ?? 0);
 
   const shipments = new Map(); // reference -> [{ shipmentId, reference, address, items, createdAt }]
   let script = [];
@@ -50,6 +55,7 @@ function createMockCourier(opts = {}) {
       address: body.address ?? null,
       items: body.items ?? [],
       createdAt: new Date().toISOString(),
+      visibleAt: Date.now() + commitDelayMs,
     };
     if (!shipments.has(s.reference)) shipments.set(s.reference, []);
     shipments.get(s.reference).push(s);
@@ -81,7 +87,8 @@ function createMockCourier(opts = {}) {
     if (req.method === 'GET' && url.pathname === '/shipments') {
       const ref = url.searchParams.get('reference');
       if (!ref) return send(res, 400, { error: 'reference is required' });
-      return send(res, 200, shipments.get(ref) ?? []);
+      const now = Date.now();
+      return send(res, 200, (shipments.get(ref) ?? []).filter((s) => (s.visibleAt ?? 0) <= now));
     }
 
     if (req.method === 'POST' && url.pathname === '/shipments') {
@@ -100,6 +107,14 @@ function createMockCourier(opts = {}) {
           timers.delete(t);
           send(res, 201, { shipmentId: s.shipmentId, reference: s.reference });
         }, hangMs);
+        timers.add(t);
+        return;
+      }
+      if (commitDelayMs > 0) {
+        const t = setTimeout(() => {
+          timers.delete(t);
+          send(res, 201, { shipmentId: s.shipmentId, reference: s.reference });
+        }, commitDelayMs);
         timers.add(t);
         return;
       }

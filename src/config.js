@@ -28,6 +28,8 @@ module.exports = {
   maxAttempts: int('MAX_ATTEMPTS', 6),
   backoffBaseMs: int('BACKOFF_BASE_MS', 500),
   backoffMaxMs: int('BACKOFF_MAX_MS', 30000),
+  // Minimum wait after a timeout before retrying; must exceed the courier's commit latency.
+  ambiguousSettleMs: int('AMBIGUOUS_SETTLE_MS', 30000),
   leaseMs: int('LEASE_MS', 30000),
   pollMs: int('POLL_MS', 250),
 };

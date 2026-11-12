@@ -9,6 +9,21 @@ function backoffMs(attempt, { baseMs, maxMs }, rand = Math.random) {
 }
 
 /**
+ * How long to wait before the next attempt.
+ *
+ * A timeout is ambiguous: the courier may still commit the POST after we gave up.
+ * GET-before-POST only protects us once that commit is visible, so after a timeout
+ * we wait at least `ambiguousSettleMs` (set above the courier's worst-case commit
+ * latency). Retrying sooner can find nothing, POST again and create a duplicate.
+ */
+function retryDelayMs(e, attempt, config) {
+  if (e.kind === 'rate_limited' && e.retryAfterMs !== undefined) return e.retryAfterMs;
+  const backoff = backoffMs(attempt, { baseMs: config.backoffBaseMs, maxMs: config.backoffMaxMs });
+  if (e.kind === 'timeout') return Math.max(config.ambiguousSettleMs ?? 0, backoff);
+  return backoff;
+}
+
+/**
  * Shipment creation for ONE order. The rule that prevents duplicates:
  *   always ask the courier "do you already have a shipment for this reference?"
  *   before POSTing. A previous attempt may have timed out after the courier
@@ -56,10 +71,8 @@ function createWorker({ repo, courier, config, log = console, concurrency = 1 })
         return true;
       }
 
-      const delay =
-        e.kind === 'rate_limited' && e.retryAfterMs !== undefined
-          ? e.retryAfterMs
-          : backoffMs(order.attempts, { baseMs: config.backoffBaseMs, maxMs: config.backoffMaxMs });
+      const delay = retryDelayMs(e, order.attempts, config);
+      // Stored in the DB (next_attempt_at), so the wait holds for every worker process.
       repo.scheduleRetry(order.order_id, Date.now() + delay, msg);
       log.warn?.(`[worker] order ${order.order_id} attempt ${order.attempts} failed (${msg}); retry in ${delay}ms`);
     }
@@ -106,4 +119,4 @@ function createWorker({ repo, courier, config, log = console, concurrency = 1 })
   };
 }
 
-module.exports = { createWorker, backoffMs, shipOrder };
+module.exports = { createWorker, backoffMs, retryDelayMs, shipOrder };

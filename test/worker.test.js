@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { openDb } = require('../src/db');
-const { createWorker, backoffMs } = require('../src/worker');
-const { createCourierClient, parseRetryAfter } = require('../src/courier');
+const { createWorker, backoffMs, retryDelayMs } = require('../src/worker');
+const { createCourierClient, parseRetryAfter, CourierError } = require('../src/courier');
 const { createMockCourier } = require('../mock-courier');
 
 const silent = { info() {}, warn() {}, error() {} };
@@ -34,6 +34,51 @@ test('backoff grows exponentially, is capped, and never zero', () => {
   assert.equal(backoffMs(1, cfg, () => 1), 100);
   assert.equal(backoffMs(3, cfg, () => 1), 400);
   assert.equal(backoffMs(10, cfg, () => 1), 1000);
+});
+
+test('retryDelayMs: timeouts wait at least the settle window; others use backoff / Retry-After', () => {
+  const cfg = { backoffBaseMs: 500, backoffMaxMs: 30000, ambiguousSettleMs: 30000 };
+  assert.equal(retryDelayMs(new CourierError('timeout', 'x'), 1, cfg), 30000);
+  assert.ok(retryDelayMs(new CourierError('server_error', 'x'), 1, cfg) <= 500);
+  assert.equal(retryDelayMs(new CourierError('rate_limited', 'x', { retryAfterMs: 2000 }), 1, cfg), 2000);
+  assert.ok(retryDelayMs(new CourierError('timeout', 'x'), 1, { ...cfg, ambiguousSettleMs: undefined }) <= 500);
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('slow-committing courier: retrying inside the commit window creates a duplicate (the reviewer scenario)', async () => {
+  // Courier commits 1200ms after the POST; our client times out at 500ms; no settle window.
+  const t = await setup({ courierOpts: { commitDelayMs: 1200 }, cfg: { ambiguousSettleMs: 0 } });
+  try {
+    t.addOrder(20);
+    await t.worker.tick(); // GET [] -> POST -> times out at 500ms; courier still committing
+    assert.match(t.repo.getOrder('20').last_error, /^timeout/);
+    await t.worker.tick({ now: FAR_FUTURE() }); // quick retry: GET still [] -> POSTs again
+    await sleep(1300); // let both commits land
+    assert.equal(t.mock.shipments.get('20').length, 2, 'documents why the settle window exists');
+  } finally {
+    await t.close();
+  }
+});
+
+test('slow-committing courier: settle window after a timeout -> retry finds the shipment, no duplicate', async () => {
+  const t = await setup({ courierOpts: { commitDelayMs: 1200 }, cfg: { ambiguousSettleMs: 1500 } });
+  try {
+    t.addOrder(21);
+    await t.worker.tick(); // POST times out at ~500ms, commit lands at ~1200ms
+    let o = t.repo.getOrder('21');
+    assert.ok(o.next_attempt_at - Date.now() >= 1300, 'retry pushed past the commit window');
+    assert.equal(await t.worker.tick(), false, 'not retried early');
+
+    await sleep(1600);
+    await t.worker.tick(); // GET now sees the committed shipment -> adopt
+    o = t.repo.getOrder('21');
+    assert.equal(o.status, 'shipped');
+    assert.equal(t.mock.shipments.get('21').length, 1);
+    assert.equal(o.shipment_id, t.mock.shipments.get('21')[0].shipmentId);
+  } finally {
+    await t.close();
+  }
 });
 
 test('parseRetryAfter handles seconds and HTTP dates', () => {
