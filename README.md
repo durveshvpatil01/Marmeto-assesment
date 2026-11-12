@@ -6,6 +6,17 @@ rate-limits, returns 5xx errors, and sometimes times out **after** creating the 
 
 **No dependencies.** It uses only Node built-ins (`node:http`, `node:crypto`, `node:sqlite`, `node:test`).
 
+> **Branch `post-review-fixes`:** fixes for two bugs found in review. `main` is unchanged, exactly as submitted.
+> 1. **Reconcile requeued dead orders every 60s with a fresh attempt budget.** An order the courier always
+>    rejects (e.g. 400) was re-POSTed about 1,440 times a day and never stayed parked. Reconcile now only *adopts*
+>    for dead orders and otherwise leaves them for a manual `npm run replay`. A test simulates a day of
+>    reconcile runs: 1,440 POSTs before the fix, 1 after.
+> 2. **A slow-committing courier could get a duplicate.** If the courier commits after our 3s timeout, a retry
+>    250–500ms later GETs before the first POST is visible and POSTs again. After a timeout the retry now waits
+>    at least `AMBIGUOUS_SETTLE_MS` (default 30s). The wait is stored in `next_attempt_at`, so it holds across
+>    worker processes. The mock courier gained `commitDelayMs`: one test reproduces the duplicate without the
+>    settle window, and one shows it fixed.
+
 ## Run it
 
 Requires Node **22.13+** (built-in SQLite). Tested on Node 24.
@@ -41,7 +52,7 @@ Operations:
 npm run reconcile                 # one reconciliation pass (also runs every 60s inside the service)
 npm run replay -- 1001            # replay a dead order
 npm run replay -- --all-dead
-npm test                          # 20 tests, about 3s
+npm test                          # 24 tests, about 7s
 ```
 
 Configuration lives in `.env` (see `.env.example`). The defaults work without any changes.
@@ -56,16 +67,19 @@ store ──POST /webhooks/orders-create──► verify HMAC (raw body) ──�
 worker loop ──claim (atomic UPDATE…RETURNING + lease)──► GET /shipments?reference=orderId
                                                           ├─ found → adopt it, mark shipped
                                                           └─ none  → POST /shipments → mark shipped
-            on failure: 429 → wait Retry-After · 5xx/timeout → exp. backoff + jitter
+            on failure: 429 → wait Retry-After · 5xx → exp. backoff + jitter
+                        timeout → wait ≥ AMBIGUOUS_SETTLE_MS (courier may still be committing)
                         non-retryable 4xx or attempts ≥ MAX → status=dead (visible, replayable)
 reconcile ──for orders not shipped (dead / overdue / expired lease)──► GET by reference
                                                           ├─ found → adopt
-                                                          └─ none  → requeue (worker path creates it)
+                                                          ├─ none, overdue pending → make due now (worker path)
+                                                          └─ none, dead → leave parked (manual replay)
 ```
 
 Order states: `pending → processing → shipped`. On a retryable failure the order goes from
 `processing` back to `pending`. When it runs out of attempts it goes from `processing` to `dead`,
-and replay or reconcile moves it from `dead` back to `pending`.
+and only a manual replay moves it from `dead` back to `pending`. Reconcile can mark a dead order
+`shipped` if the courier turns out to have it.
 
 ## Design decisions and why
 
@@ -99,14 +113,19 @@ If a worker dies, its lease expires and another worker picks the job up, which i
 decision 1. `npm run worker` can run as a separate process against the same DB (WAL mode).
 
 **5. Retry policy.** For a `429`, the worker waits exactly `Retry-After` (seconds or an HTTP date).
-For `5xx`, timeouts and network errors it uses exponential backoff with equal jitter, so the wait is
-never zero and never synchronised across jobs. It is capped at `BACKOFF_MAX_MS`. Any other `4xx`
+For `5xx` and network errors it uses exponential backoff with equal jitter, so the wait is
+never zero and never synchronised across jobs. It is capped at `BACKOFF_MAX_MS`. A **timeout** is
+ambiguous (the courier may still commit the POST), so its retry waits at least `AMBIGUOUS_SETTLE_MS`
+(default 30s). This must be longer than the courier's worst-case commit latency, otherwise the next
+GET can run too early, find nothing, and POST a duplicate. Any other `4xx`
 can't be fixed by retrying, so the job goes straight to `dead`. After `MAX_ATTEMPTS` (default 6)
 the job is parked as `dead` with `last_error` saved.
 
-**6. Reconcile never creates.** It only looks up the shipment and then either adopts it or
-requeues the order. That leaves one code path that can `POST`, and it skips orders a live worker
-is holding. Running it twice is a no-op, and a test checks this.
+**6. Reconcile never creates, and never revives dead orders.** It only looks up the shipment. If the
+courier has it, reconcile adopts it. If not, an overdue `pending` order is made due now, but a `dead` order stays
+parked: dead means a human should look (a 400, or retries exhausted), and auto-requeueing would re-POST
+it forever. That leaves one code path that can `POST`, and reconcile skips orders a live worker is holding.
+Running it twice is a no-op, and a test checks this.
 
 **7. Timeouts vs. leases.** The courier timeout is 3s and the lease is 30s. The lease must
 be longer than a full attempt (GET + POST) so a slow job isn't stolen while it's still running.
@@ -117,9 +136,9 @@ be longer than a full attempt (GET + POST) so a slow job isn't stolen while it's
 |---|---|
 | HMAC | Correct / wrong / missing / wrong-length signatures. The digest is computed over the raw body, not re-serialised JSON. |
 | Ingest | The same webhook twice, the same order under a new id, and 10 concurrent duplicates each produce one order. A bad signature returns 401 and stores nothing. Bad JSON returns 400. The handler responds in under 1s. |
-| Worker | Timeout after create: the retry adopts the shipment and no duplicate is made. A 429 schedules the retry at Retry-After. 5xx errors back off and then succeed. Max attempts leads to dead. A crashed worker's lease is reclaimed without a double create. |
+| Worker | Timeout after create: the retry adopts the shipment and no duplicate is made. A 429 schedules the retry at Retry-After. 5xx errors back off and then succeed. Max attempts leads to dead. A crashed worker's lease is reclaimed without a double create. A slow-committing courier: a retry inside the commit window duplicates, and the settle window prevents it. |
 | Chaos | 40 orders, 4 concurrent workers, the courier's real random failure rates: every shipment exists exactly once. |
-| Reconcile | Adopts a shipment the courier created. Requeues when there is none, then ships once. Is idempotent. Leaves held orders alone. Survives the courier being down. |
+| Reconcile | Adopts a shipment the courier created. Leaves a dead order parked when the courier has none; a manual replay then ships it once. Over a simulated day, an order the courier always 400s is POSTed once. Is idempotent. Leaves held orders alone. Survives the courier being down. |
 
 I also ran it end to end. 8 orders were each sent 3 times against the live mock courier with
 10s hangs. Result: 8 shipments, 0 duplicates, and one order went through the timeout-then-adopt path.
@@ -131,6 +150,8 @@ The behaviour required by the brief is unchanged. I added:
 - `GET /__control/stats` (shipments per reference + `duplicates`)
 - `POST /__control/reset`
 - `400` when `reference` is missing
+- `commitDelayMs` (`MOCK_COMMIT_DELAY_MS`): a shipment becomes visible to GET, and the POST answers, only after
+  this delay, to model a courier that commits asynchronously
 
 ## What I deliberately left out
 - **A GET-then-POST race between two *different* systems.** If something other than this service
