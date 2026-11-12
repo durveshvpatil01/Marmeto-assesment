@@ -13,7 +13,7 @@ async function startApp() {
   const repo = openDb(':memory:');
   const server = createApp({ repo, secret: SECRET, log: silent });
   await new Promise((r) => server.listen(0, r));
-  const url = `http://localhost:${server.address().port}/webhooks/orders-create`;
+  const url = `http://127.0.0.1:${server.address().port}/webhooks/orders-create`;
   return {
     repo,
     post: (body, headers = {}) =>

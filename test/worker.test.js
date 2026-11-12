@@ -11,14 +11,14 @@ const silent = { info() {}, warn() {}, error() {} };
 const FAR_FUTURE = () => Date.now() + 10 * 60 * 1000;
 
 async function setup({ courierOpts = {}, cfg = {} } = {}) {
-  const mock = createMockCourier({ fail500: 0, fail429: 0, hang: 0, hangMs: 400, ...courierOpts });
+  const mock = createMockCourier({ fail500: 0, fail429: 0, hang: 0, hangMs: 1500, ...courierOpts });
   const port = await mock.listen();
   const repo = openDb(':memory:');
   const config = {
     leaseMs: 5000, maxAttempts: 5, backoffBaseMs: 100, backoffMaxMs: 1000, pollMs: 10,
     ...cfg,
   };
-  const courier = createCourierClient({ baseUrl: `http://localhost:${port}`, timeoutMs: 150 });
+  const courier = createCourierClient({ baseUrl: `http://127.0.0.1:${port}`, timeoutMs: 500 });
   const worker = createWorker({ repo, courier, config, log: silent });
   const addOrder = (id) =>
     repo.ingestOrder({ webhookId: `w-${id}`, orderId: String(id), payload: JSON.stringify({ id, line_items: [] }) });
@@ -61,7 +61,7 @@ test('timeout AFTER courier created the shipment -> retry adopts it, no duplicat
   const t = await setup();
   try {
     t.addOrder(2);
-    t.mock.setScript(['hang']); // creates shipment, then hangs past our 150ms timeout
+    t.mock.setScript(['hang']); // creates shipment, then hangs past our 500ms timeout
 
     await t.worker.tick();
     let o = t.repo.getOrder('2');
@@ -151,12 +151,12 @@ test('crashed worker: expired lease is reclaimed and does not double-create', as
 
 test('chaos: 40 orders against random failures with concurrent workers -> no duplicates', async () => {
   const t = await setup({
-    courierOpts: { fail500: 0.2, fail429: 0.1, hang: 0.1, hangMs: 300, retryAfterSec: 0 },
+    courierOpts: { fail500: 0.2, fail429: 0.1, hang: 0.1, hangMs: 1000, retryAfterSec: 0 },
     cfg: { maxAttempts: 25, backoffBaseMs: 5, backoffMaxMs: 20, leaseMs: 5000 },
   });
   const concurrentWorker = createWorker({
     repo: t.repo,
-    courier: createCourierClient({ baseUrl: `http://localhost:${t.mock.server.address().port}`, timeoutMs: 100 }),
+    courier: createCourierClient({ baseUrl: `http://127.0.0.1:${t.mock.server.address().port}`, timeoutMs: 400 }),
     config: { leaseMs: 5000, maxAttempts: 25, backoffBaseMs: 5, backoffMaxMs: 20, pollMs: 5 },
     log: silent,
     concurrency: 4,

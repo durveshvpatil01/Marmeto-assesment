@@ -41,7 +41,7 @@ Operations:
 npm run reconcile                 # one reconciliation pass (also runs every 60s inside the service)
 npm run replay -- 1001            # replay a dead order
 npm run replay -- --all-dead
-npm test                          # 20 tests, about 2s
+npm test                          # 20 tests, about 3s
 ```
 
 Configuration lives in `.env` (see `.env.example`). The defaults work without any changes.

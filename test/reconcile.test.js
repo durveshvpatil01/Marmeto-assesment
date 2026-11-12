@@ -12,10 +12,10 @@ const silent = { info() {}, warn() {}, error() {} };
 const config = { leaseMs: 5000, maxAttempts: 2, backoffBaseMs: 10, backoffMaxMs: 20, pollMs: 10 };
 
 async function setup() {
-  const mock = createMockCourier({ fail500: 0, fail429: 0, hang: 0, hangMs: 300 });
+  const mock = createMockCourier({ fail500: 0, fail429: 0, hang: 0, hangMs: 1500 });
   const port = await mock.listen();
   const repo = openDb(':memory:');
-  const courier = createCourierClient({ baseUrl: `http://localhost:${port}`, timeoutMs: 100 });
+  const courier = createCourierClient({ baseUrl: `http://127.0.0.1:${port}`, timeoutMs: 500 });
   const worker = createWorker({ repo, courier, config, log: silent });
   const add = (id) => repo.ingestOrder({ webhookId: `w${id}`, orderId: String(id), payload: '{"id":1}' });
   return { mock, repo, courier, worker, add, close: async () => { await mock.close(); repo.close(); } };
@@ -90,7 +90,7 @@ test('courier unreachable during reconcile -> order untouched, error counted', a
   try {
     t.add(14);
     t.repo.db.exec("UPDATE orders SET status='dead' WHERE order_id='14'");
-    const down = createCourierClient({ baseUrl: 'http://localhost:1', timeoutMs: 100 });
+    const down = createCourierClient({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 100 });
     const s = await reconcile({ repo: t.repo, courier: down, graceMs: 0, log: silent });
     assert.equal(s.errors, 1);
     assert.equal(t.repo.getOrder('14').status, 'dead');
